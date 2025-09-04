@@ -1,0 +1,134 @@
+name: "EC2 Temporary SSH Access"
+description: |
+  Creates a temporary EC2 Security Group that allows SSH from the GitHub runner’s public IP,
+  attaches it to a target instance, and deletes it when finished.
+
+author: "Komi Sewovi"
+inputs:
+  action:
+    description: "What to do: create or delete the temporary SG"
+    required: true
+    default: "create"
+
+  aws-access-key-id:
+    description: "AWS access key (if not using configure-aws-credentials)"
+    required: false
+
+  aws-secret-access-key:
+    description: "AWS secret key (if not using configure-aws-credentials)"
+    required: false
+
+  aws-region:
+    description: "Region where the instance is running"
+    required: true
+
+  vpc-id:
+    description: "VPC where temporary SG will be created. Leave empty to deploy in the default VPC. If using a custom VPC, you must provide the VPC ID."
+    required: false
+
+  instance-id:
+    description: "Target EC2 instance ID"
+    required: true
+
+  username:
+    description: "EC2 login username"
+    required: false
+    default: "ubuntu"
+
+runs:
+  using: "composite"
+  steps:
+    # ----------------------------
+    # RESOLVE VPC
+    # ----------------------------
+    - name: Resolve VPC ID
+      id: vpc
+      run: |
+        if [ -z "${{ inputs.vpc-id }}" ]; then
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=isDefault,Values=true" \
+            --query "Vpcs[0].VpcId" \
+            --output text)
+          echo "ℹ️ No VPC ID given, using default VPC: $VPC_ID"
+        else
+          VPC_ID="${{ inputs.vpc-id }}"
+          echo "ℹ️ Using user-provided VPC ID: $VPC_ID"
+        fi
+        echo "vpc=$VPC_ID" >> $GITHUB_OUTPUT
+      shell: bash
+
+    # ----------------------------
+    # CREATE FLOW
+    # ----------------------------
+    - name: Get existing SGs
+      if: ${{ inputs.action == 'create' }}
+      id: existing
+      run: |
+        EXISTING=$(aws ec2 describe-instances \
+          --instance-ids ${{ inputs.instance-id }} \
+          --query "Reservations[0].Instances[0].SecurityGroups[].GroupId" \
+          --output text)
+        echo "✅ Retrieved existing security groups for instance ${{ inputs.instance-id }}: $EXISTING"
+        echo "existing=$EXISTING" >> $GITHUB_OUTPUT
+      shell: bash
+
+    - name: Create temp SG
+      if: ${{ inputs.action == 'create' }}
+      id: temp
+      run: |
+        TEMP_SG=$(aws ec2 create-security-group \
+          --group-name gha-temp-sg-${GITHUB_RUN_ID} \
+          --description "Temporary SG for GitHub Actions" \
+          --vpc-id ${{ steps.vpc.outputs.vpc }} \
+          --query "GroupId" \
+          --output text)
+        echo "✅ Temporary security group $TEMP_SG created in VPC ${{ steps.vpc.outputs.vpc }}"
+        echo "temp=$TEMP_SG" >> $GITHUB_OUTPUT
+      shell: bash
+
+    - name: Add ingress rule
+      if: ${{ inputs.action == 'create' }}
+      id: ingress
+      run: |
+        MYIP=$(curl -s https://checkip.amazonaws.com)
+        aws ec2 authorize-security-group-ingress \
+          --group-id ${{ steps.temp.outputs.temp }} \
+          --protocol tcp \
+          --port 22 \
+          --cidr $MYIP/32
+        echo "✅ Ingress rule added: allow SSH (22) from $MYIP/32 to SG ${{ steps.temp.outputs.temp }}"
+        echo "ip=$MYIP" >> $GITHUB_OUTPUT
+      shell: bash
+
+    - name: Attach SGs to instance
+      if: ${{ inputs.action == 'create' }}
+      run: |
+        aws ec2 modify-instance-attribute \
+          --instance-id ${{ inputs.instance-id }} \
+          --groups ${{ steps.existing.outputs.existing }} ${{ steps.temp.outputs.temp }}
+        echo "✅ Instance ${{ inputs.instance-id }} now has SGs: ${{ steps.existing.outputs.existing }} and ${{ steps.temp.outputs.temp }}"
+      shell: bash
+
+    # ----------------------------
+    # DELETE FLOW
+    # ----------------------------
+    - name: Restore original SGs
+      if: ${{ inputs.action == 'delete' }}
+      run: |
+        aws ec2 modify-instance-attribute \
+          --instance-id ${{ inputs.instance-id }} \
+          --groups ${{ steps.existing.outputs.existing }}
+        echo "♻️ Restored instance ${{ inputs.instance-id }} back to original SGs: ${{ steps.existing.outputs.existing }}"
+      shell: bash
+
+    - name: Delete temp SG
+      if: ${{ inputs.action == 'delete' }}
+      run: |
+        aws ec2 delete-security-group \
+          --group-id ${{ steps.temp.outputs.temp }}
+        echo "🗑️ Deleted temporary SG ${{ steps.temp.outputs.temp }}"
+      shell: bash
+
+branding:
+  icon: "copy"
+  color: "gray-dark"
