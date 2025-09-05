@@ -112,37 +112,41 @@ runs:
     # ----------------------------
     # DELETE FLOW
     # ----------------------------
-    - name: Capture or restore SGs
-      id: restore
+    # ----------------------------
+    # SAVE / RESTORE SG CONTEXT
+    # ----------------------------
+    - name: Save SG context
+      if: ${{ inputs.action == 'create' }}
       run: |
-        if [ "${{ inputs.action }}" = "create" ]; then
-          # Save the SGs we captured earlier from the `existing` step
-          echo "original_sgs=${{ steps.existing.outputs.existing }}" >> $GITHUB_OUTPUT
-          echo "✅ Stored original SGs for later: ${{ steps.existing.outputs.existing }}"
+        echo "${{ steps.existing.outputs.existing }}" > sg_existing.txt
+        echo "${{ steps.temp.outputs.temp }}" > sg_temp.txt
+        echo "✅ Stored SG context for later cleanup"
 
-          # Save the temp SG ID from the `temp` step
-          echo "temp_sg=${{ steps.temp.outputs.temp }}" >> $GITHUB_OUTPUT
-          echo "✅ Stored SG context for later cleanup: original=${{ steps.existing.outputs.existing }}, temp=${{ steps.temp.outputs.temp }}"
-
-        elif [ "${{ inputs.action }}" = "delete" ]; then
-          # Ensure we have both outputs available
-          if [ -z "${{ steps.restore.outputs.original_sgs }}" ] || [ -z "${{ steps.restore.outputs.temp_sg }}" ]; then
-            echo "❌ No saved SGs available to restore or delete."
-            exit 1
-          fi
-
-          # Restore original SGs
-          aws ec2 modify-instance-attribute \
-            --instance-id ${{ inputs.instance-id }} \
-            --groups ${{ steps.restore.outputs.original_sgs }}
-          echo "♻️ Restored instance ${{ inputs.instance-id }} back to original SGs: ${{ steps.restore.outputs.original_sgs }}"
-
-          # Delete the temp SG
-          aws ec2 delete-security-group \
-            --group-id ${{ steps.restore.outputs.temp_sg }}
-          echo "🗑️ Deleted temporary SG ${{ steps.restore.outputs.temp_sg }}"
-        fi
       shell: bash
+
+    - name: Restore and delete SGs
+      if: ${{ inputs.action == 'delete' }}
+      run: |
+        if [ ! -f sg_existing.txt ] || [ ! -f sg_temp.txt ]; then
+          echo "❌ No saved SGs available to restore or delete."
+          exit 1
+        fi
+
+        EXISTING=$(cat sg_existing.txt)
+        TEMP=$(cat sg_temp.txt)
+
+        # Restore original SGs
+        aws ec2 modify-instance-attribute \
+          --instance-id ${{ inputs.instance-id }} \
+          --groups $EXISTING
+        echo "♻️ Restored instance ${{ inputs.instance-id }} back to original SGs: $EXISTING"
+
+        # Delete the temp SG
+        aws ec2 delete-security-group \
+          --group-id $TEMP
+        echo "🗑️ Deleted temporary SG $TEMP"
+      shell: bash
+
 
 branding:
   icon: "copy"
